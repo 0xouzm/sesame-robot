@@ -646,6 +646,7 @@ function updateMotor(motorNum, value) {
 }
 
 function openSettings() {
+  loadWifiStatus();
   fetch('/getSettings').then(r => r.json()).then(data => {
     document.getElementById('frameDelay').value = data.frameDelay || 100;
     document.getElementById('walkCycles').value = data.walkCycles || 10;
@@ -730,6 +731,90 @@ function saveSettings() {
   fetch(`/setSettings?frameDelay=${fd}&walkCycles=${wc}&motorCurrentDelay=${mcd}&motorSpeed=${ms}`)
     .then(() => closeSettings())
     .catch(() => closeSettings());
+}
+
+function toggleManualSsid() {
+  const manual = document.getElementById('wifiManual').checked;
+  document.getElementById('wifiSsidManual').style.display = manual ? 'block' : 'none';
+  document.getElementById('wifiSsid').style.display = manual ? 'none' : 'block';
+}
+
+// Builds "http://<host> (<ip>)" as safe DOM nodes (no innerHTML — SSIDs/values
+// are untrusted and could carry markup).
+function appendRobotLink(parent, host, ip) {
+  const a = document.createElement('a');
+  a.href = 'http://' + host;
+  a.textContent = 'http://' + host;
+  a.style.color = 'var(--content-color)';
+  parent.appendChild(a);
+  parent.appendChild(document.createTextNode(' (' + ip + ')'));
+}
+
+function loadWifiStatus() {
+  fetch('/api/wifi/status').then(r => r.json()).then(d => {
+    const el = document.getElementById('wifiStatus');
+    el.textContent = '';
+    if (d.connected) {
+      el.appendChild(document.createTextNode('Connected to '));
+      const b = document.createElement('b');
+      b.textContent = d.ssid;            // textContent: SSID is untrusted
+      el.appendChild(b);
+      el.appendChild(document.createTextNode(' — '));
+      appendRobotLink(el, d.host, d.ip);
+    } else {
+      el.textContent = 'Not connected (Access Point mode only).';
+    }
+  }).catch(() => {
+    document.getElementById('wifiStatus').textContent = 'Status unavailable.';
+  });
+}
+
+function scanWifi() {
+  const sel = document.getElementById('wifiSsid');
+  const result = document.getElementById('wifiResult');
+  result.textContent = 'Scanning…';
+  fetch('/api/wifi/scan').then(r => r.json()).then(list => {
+    const best = {};
+    list.forEach(n => {
+      if (!n.ssid) return;
+      if (!(n.ssid in best) || n.rssi > best[n.ssid].rssi) best[n.ssid] = n;
+    });
+    const nets = Object.values(best).sort((a, b) => b.rssi - a.rssi);
+    sel.innerHTML = '<option value="">&mdash; select network &mdash;</option>';
+    nets.forEach(n => {
+      const pct = Math.min(100, Math.max(0, 2 * (n.rssi + 100)));
+      const opt = document.createElement('option');
+      opt.value = n.ssid;
+      opt.textContent = n.ssid + ' (' + pct + '%' + (n.secure ? ' 🔒' : '') + ')';
+      sel.appendChild(opt);
+    });
+    result.textContent = nets.length ? (nets.length + ' networks found.') : 'No networks found.';
+  }).catch(() => { result.textContent = 'Scan failed.'; });
+}
+
+function connectWifi() {
+  const manual = document.getElementById('wifiManual').checked;
+  const ssid = manual ? document.getElementById('wifiSsidManual').value.trim()
+                      : document.getElementById('wifiSsid').value;
+  const pass = document.getElementById('wifiPass').value;
+  const result = document.getElementById('wifiResult');
+  if (!ssid) { result.textContent = 'Please select or enter a network.'; return; }
+  result.textContent = 'Connecting to ' + ssid + '… (can take ~10s)';
+  const body = 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(pass);
+  fetch('/api/wifi/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body
+  }).then(r => r.json()).then(d => {
+    if (d.success) {
+      result.textContent = 'Connected! Reach the robot at ';
+      appendRobotLink(result, d.host, d.ip);
+      loadWifiStatus();
+    } else {
+      result.textContent = 'Failed: ' + (d.error || 'could not connect') +
+        '. Check the password and that it is a 2.4GHz network.';
+    }
+  }).catch(() => { result.textContent = 'Connection request failed.'; });
 }
 
 let activeGamepadIndex = null;
