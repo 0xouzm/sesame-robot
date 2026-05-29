@@ -193,6 +193,10 @@ void handleGetStatus();
 void handleApiCommand();
 void updateWifiInfoScroll();
 void recordInput();
+bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs = 10000);
+void handleWifiScan();
+void handleWifiConnect();
+void handleWifiStatus();
 
 void handleRoot() {
   server.send(200, "text/html", index_html);
@@ -357,6 +361,38 @@ void handleApiCommand() {
   }
 }
 
+// Connect the station interface to a WiFi network while keeping the SoftAP +
+// captive portal alive (WIFI_AP_STA), so the web UI is never lost mid-setup.
+// Sets networkConnected / networkIP on success. Returns true if connected
+// within timeoutMs. mDNS re-announce + OLED text refresh are done by the
+// caller that needs them (the boot path does those separately afterward).
+bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
+  if (ssid.length() == 0) return false;
+
+  Serial.println("Connecting to WiFi network: " + ssid);
+  WiFi.mode(WIFI_AP_STA);                 // keep AP up alongside station
+  WiFi.setHostname(deviceHostname.c_str());
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connect failed.");
+    return false;
+  }
+
+  networkConnected = true;
+  networkIP = WiFi.localIP();
+  Serial.print("Connected! IP: ");
+  Serial.println(networkIP);
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);
   randomSeed(micros());
@@ -380,27 +416,7 @@ void setup() {
   // --- WIFI CONFIGURATION ---
   // Try to connect to network first if configured
   if (ENABLE_NETWORK_MODE && String(NETWORK_SSID).length() > 0) {
-    Serial.println("Attempting to connect to network: " + String(NETWORK_SSID));
-    WiFi.mode(WIFI_AP_STA); // Enable both AP and Station modes
-    WiFi.setHostname(deviceHostname.c_str());
-    WiFi.begin(NETWORK_SSID, NETWORK_PASS);
-    
-    // Wait up to 10 seconds for connection
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      networkConnected = true;
-      networkIP = WiFi.localIP();
-      Serial.println();
-      Serial.print("Connected to network! IP: ");
-      Serial.println(networkIP);
-    } else {
-      Serial.println();
+    if (!connectToWifi(NETWORK_SSID, NETWORK_PASS)) {
       Serial.println("Failed to connect to network. Running in AP-only mode.");
       WiFi.mode(WIFI_AP); // Fall back to AP-only
     }
