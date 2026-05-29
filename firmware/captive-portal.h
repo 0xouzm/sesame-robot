@@ -460,6 +460,25 @@ const char index_html[] PROGMEM = R"rawliteral(
         <input type="color" id="customColor" value="#ff8c42" style="margin-top: 10px; display: none;">
       </div>
 
+      <div class="settings-section">
+        <h4>WiFi / Network</h4>
+        <div id="wifiStatus" style="font-size:13px; color:#ccc; margin-bottom:10px;">Checking&hellip;</div>
+        <label>Network:</label>
+        <select id="wifiSsid">
+          <option value="">&mdash; scan for networks &mdash;</option>
+        </select>
+        <label style="margin-top:12px;">
+          <input type="checkbox" id="wifiManual" style="width:auto; margin-right:8px;" onchange="toggleManualSsid()">
+          Enter name manually (hidden network)
+        </label>
+        <input type="text" id="wifiSsidManual" placeholder="Network name" style="display:none;">
+        <label>Password:</label>
+        <input type="password" id="wifiPass" placeholder="WiFi password">
+        <button class="btn-settings" style="width:100%; margin-top:12px;" onclick="scanWifi()">Scan for Networks</button>
+        <button class="btn-settings" style="width:100%; margin-top:8px;" onclick="connectWifi()">Connect</button>
+        <div id="wifiResult" style="font-size:13px; margin-top:10px; min-height:18px;"></div>
+      </div>
+
       <button class="btn-settings" style="width: 100%; margin-top: 20px;" onclick="openMotorControl()">Manual Motor Control</button>
 
       <button class="btn-save" onclick="saveSettings()">Save Settings</button>
