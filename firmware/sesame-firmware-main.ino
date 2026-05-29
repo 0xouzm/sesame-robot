@@ -393,6 +393,79 @@ bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
   return true;
 }
 
+// GET /api/wifi/scan -> JSON array of nearby networks (raw; the UI dedups/sorts).
+void handleWifiScan() {
+  if (WiFi.getMode() == WIFI_AP) {
+    WiFi.mode(WIFI_AP_STA);   // station iface must be up to scan
+  }
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    String ssid = WiFi.SSID(i);
+    ssid.replace("\\", "\\\\");
+    ssid.replace("\"", "\\\"");
+    json += "{\"ssid\":\"" + ssid + "\",";
+    json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+    json += "\"secure\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true") + "}";
+  }
+  json += "]";
+  WiFi.scanDelete();
+  server.send(200, "application/json", json);
+}
+
+// POST /api/wifi/connect (form: ssid, password) -> {success, ip, host} | {success:false, error}
+void handleWifiConnect() {
+  if (server.method() != HTTP_POST) {
+    server.send(405, "application/json", "{\"success\":false,\"error\":\"Method not allowed\"}");
+    return;
+  }
+  String ssid = server.arg("ssid");
+  String pass = server.arg("password");
+  if (ssid.length() == 0) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"SSID required\"}");
+    return;
+  }
+
+  if (!connectToWifi(ssid, pass)) {
+    server.send(200, "application/json", "{\"success\":false,\"error\":\"Could not connect\"}");
+    return;
+  }
+
+  // Re-announce mDNS on the freshly-joined station interface so
+  // sesame-robot.local resolves on the LAN.
+  MDNS.end();
+  if (MDNS.begin(deviceHostname.c_str())) {
+    MDNS.addService("http", "tcp", 80);
+  }
+
+  // Refresh the OLED scroll text to show the new network.
+  wifiInfoText = "AP: " + String(AP_SSID) + " (" + WiFi.softAPIP().toString() +
+                 ")  |  Network: " + ssid + " (" + networkIP.toString() + ") or " +
+                 deviceHostname + ".local  |  ";
+
+  String json = "{\"success\":true,\"ip\":\"" + networkIP.toString() +
+                "\",\"host\":\"" + deviceHostname + ".local\"}";
+  server.send(200, "application/json", json);
+}
+
+// GET /api/wifi/status -> current station connection state for the Settings panel.
+void handleWifiStatus() {
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  String json = "{\"connected\":" + String(connected ? "true" : "false");
+  if (connected) {
+    String ssid = WiFi.SSID();
+    ssid.replace("\\", "\\\\");
+    ssid.replace("\"", "\\\"");
+    json += ",\"ssid\":\"" + ssid + "\"";
+    json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += ",\"host\":\"" + deviceHostname + ".local\"";
+    json += ",\"rssi\":" + String(WiFi.RSSI());
+  }
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
 void setup() {
   Serial.begin(115200);
   randomSeed(micros());
@@ -468,6 +541,11 @@ void setup() {
   // API endpoints for network communication
   server.on("/api/status", handleGetStatus);
   server.on("/api/command", handleApiCommand);
+
+  // WiFi provisioning endpoints (runtime network setup from the web UI)
+  server.on("/api/wifi/scan", handleWifiScan);
+  server.on("/api/wifi/connect", handleWifiConnect);
+  server.on("/api/wifi/status", handleWifiStatus);
   
   // Catch-all route for captive portal
   // This ensures any URL redirects to the controller page
