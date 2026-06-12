@@ -750,6 +750,16 @@ function appendRobotLink(parent, host, ip) {
   parent.appendChild(document.createTextNode(' (' + ip + ')'));
 }
 
+// Appends "http://<host> (<ip>)" — or just the raw IP when the robot reports
+// its mDNS responder didn't start — as safe DOM nodes.
+function appendRobotAddress(parent, d) {
+  if (d.mdns) {
+    appendRobotLink(parent, d.host, d.ip);
+  } else {
+    parent.appendChild(document.createTextNode('http://' + d.ip));
+  }
+}
+
 function loadWifiStatus() {
   fetch('/api/wifi/status').then(r => r.json()).then(d => {
     const el = document.getElementById('wifiStatus');
@@ -760,7 +770,9 @@ function loadWifiStatus() {
       b.textContent = d.ssid;            // textContent: SSID is untrusted
       el.appendChild(b);
       el.appendChild(document.createTextNode(' — '));
-      appendRobotLink(el, d.host, d.ip);
+      appendRobotAddress(el, d);
+    } else if (d.connecting) {
+      el.textContent = 'Connecting…';
     } else {
       el.textContent = 'Not connected (Access Point mode only).';
     }
@@ -769,18 +781,35 @@ function loadWifiStatus() {
   });
 }
 
+// The scan runs asynchronously on the robot: /api/wifi/scan answers
+// {"scanning":true} until results are ready, so poll about once a second.
 function scanWifi() {
+  document.getElementById('wifiResult').textContent = 'Scanning…';
+  pollWifiScan(0);
+}
+
+function pollWifiScan(attempt) {
   const sel = document.getElementById('wifiSsid');
   const result = document.getElementById('wifiResult');
-  result.textContent = 'Scanning…';
-  fetch('/api/wifi/scan').then(r => r.json()).then(list => {
-    const best = {};
-    list.forEach(n => {
+  fetch('/api/wifi/scan').then(r => r.json()).then(data => {
+    if (!Array.isArray(data)) {
+      if (attempt < 20) setTimeout(() => pollWifiScan(attempt + 1), 1000);
+      else result.textContent = 'Scan timed out.';
+      return;
+    }
+    // Map (not {}): SSIDs are untrusted and may collide with
+    // Object.prototype keys ('constructor', '__proto__', ...).
+    const best = new Map();
+    data.forEach(n => {
       if (!n.ssid) return;
-      if (!(n.ssid in best) || n.rssi > best[n.ssid].rssi) best[n.ssid] = n;
+      if (!best.has(n.ssid) || n.rssi > best.get(n.ssid).rssi) best.set(n.ssid, n);
     });
-    const nets = Object.values(best).sort((a, b) => b.rssi - a.rssi);
-    sel.innerHTML = '<option value="">&mdash; select network &mdash;</option>';
+    const nets = Array.from(best.values()).sort((a, b) => b.rssi - a.rssi);
+    sel.textContent = '';
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = '— select network —';
+    sel.appendChild(ph);
     nets.forEach(n => {
       const pct = Math.min(100, Math.max(0, 2 * (n.rssi + 100)));
       const opt = document.createElement('option');
@@ -789,9 +818,16 @@ function scanWifi() {
       sel.appendChild(opt);
     });
     result.textContent = nets.length ? (nets.length + ' networks found.') : 'No networks found.';
-  }).catch(() => { result.textContent = 'Scan failed.'; });
+  }).catch(() => {
+    // Transient AP hiccup — retry on the same schedule.
+    if (attempt < 20) setTimeout(() => pollWifiScan(attempt + 1), 1000);
+    else result.textContent = 'Scan failed.';
+  });
 }
 
+// POST starts the attempt; the robot connects in the background (its access
+// point may briefly drop while it changes WiFi channel), so the outcome is
+// read by polling /api/wifi/status — which also survives that brief drop.
 function connectWifi() {
   const manual = document.getElementById('wifiManual').checked;
   const ssid = manual ? document.getElementById('wifiSsidManual').value.trim()
@@ -799,7 +835,7 @@ function connectWifi() {
   const pass = document.getElementById('wifiPass').value;
   const result = document.getElementById('wifiResult');
   if (!ssid) { result.textContent = 'Please select or enter a network.'; return; }
-  result.textContent = 'Connecting to ' + ssid + '… (can take ~10s)';
+  result.textContent = 'Connecting to ' + ssid + '… (can take ~15s)';
   const body = 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(pass);
   fetch('/api/wifi/connect', {
     method: 'POST',
@@ -807,14 +843,38 @@ function connectWifi() {
     body: body
   }).then(r => r.json()).then(d => {
     if (d.success) {
-      result.textContent = 'Connected! Reach the robot at ';
-      appendRobotLink(result, d.host, d.ip);
-      loadWifiStatus();
+      setTimeout(() => pollWifiConnect(0), 1500);
     } else {
-      result.textContent = 'Failed: ' + (d.error || 'could not connect') +
-        '. Check the password and that it is a 2.4GHz network.';
+      result.textContent = 'Failed: ' + (d.error || 'could not start connection') + '.';
     }
-  }).catch(() => { result.textContent = 'Connection request failed.'; });
+  }).catch(() => {
+    // The request may have been cut off mid-flight; the attempt is most
+    // likely still running on the robot, so poll for the outcome anyway.
+    setTimeout(() => pollWifiConnect(0), 1500);
+  });
+}
+
+function pollWifiConnect(attempt) {
+  const result = document.getElementById('wifiResult');
+  fetch('/api/wifi/status').then(r => r.json()).then(d => {
+    if (d.connected) {
+      result.textContent = 'Connected! Reach the robot at ';
+      appendRobotAddress(result, d);
+      loadWifiStatus();
+      return;
+    }
+    if (d.connecting) {
+      if (attempt < 30) setTimeout(() => pollWifiConnect(attempt + 1), 1000);
+      else result.textContent = 'Still trying… reopen Settings to check the status.';
+      return;
+    }
+    result.textContent = 'Failed: ' + (d.lastError || 'could not connect') +
+      '. Check the password and that it is a 2.4GHz network.';
+  }).catch(() => {
+    // The phone may be rejoining the robot's AP after a channel change.
+    if (attempt < 30) setTimeout(() => pollWifiConnect(attempt + 1), 1000);
+    else result.textContent = 'Lost contact with the robot. Rejoin its WiFi network and reopen Settings.';
+  });
 }
 
 let activeGamepadIndex = null;

@@ -76,6 +76,20 @@ String wifiInfoText = "";
 bool networkConnected = false;
 IPAddress networkIP;
 String deviceHostname = "sesame-robot";
+bool mdnsOk = false;
+
+// Runtime WiFi provisioning (web UI) — the connect attempt runs as a state
+// machine driven from loop() so HTTP handlers never block the captive portal.
+enum WifiSetupState { WIFI_SETUP_IDLE, WIFI_SETUP_QUEUED, WIFI_SETUP_CONNECTING };
+WifiSetupState wifiSetupState = WIFI_SETUP_IDLE;
+String wifiSetupSsid = "";
+String wifiSetupPass = "";
+String wifiSetupError = "";          // result of the last finished attempt ("" = none/success)
+unsigned long wifiSetupQueuedMs = 0;
+unsigned long wifiSetupStartMs = 0;
+bool wifiRestoreApOnly = false;      // drop the station iface again after an AP-only scan
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+const uint32_t WIFI_SETUP_START_DELAY_MS = 300;  // let the HTTP response flush before the AP channel may hop
 
 // Servo Pins for Distro Board
 // ======================================================================
@@ -200,6 +214,14 @@ bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs = 
 void handleWifiScan();
 void handleWifiConnect();
 void handleWifiStatus();
+void handleNotFound();
+String jsonEscape(const String& s);
+bool startMdns();
+void announceNetwork(const String& ssid);
+void setApOnlyInfoText();
+void showWifiInfoNow();
+void updateWifiSetup();
+void finishWifiSetup(const String& err);
 
 void handleRoot() {
   server.send(200, "text/html", index_html);
@@ -364,11 +386,68 @@ void handleApiCommand() {
   }
 }
 
-// Connect the station interface to a WiFi network while keeping the SoftAP +
-// captive portal alive (WIFI_AP_STA), so the web UI is never lost mid-setup.
-// Sets networkConnected / networkIP on success. Returns true if connected
-// within timeoutMs. mDNS re-announce + OLED text refresh are done by the
-// caller that needs them (the boot path does those separately afterward).
+// Escape a string for embedding in a JSON string literal. Handles backslash,
+// double-quote, and control characters (SSIDs are arbitrary octets — a nearby
+// network with a newline in its name must not break the whole response).
+String jsonEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '\\') out += "\\\\";
+    else if (c == '"') out += "\\\"";
+    else if ((uint8_t)c < 0x20) {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "\\u%04x", (uint8_t)c);
+      out += buf;
+    } else out += c;
+  }
+  return out;
+}
+
+// Start (or restart, after MDNS.end()) the mDNS responder. Tracks the result
+// in mdnsOk so the API can avoid advertising a .local name that won't resolve.
+bool startMdns() {
+  mdnsOk = MDNS.begin(deviceHostname.c_str());
+  if (mdnsOk) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS responder started: http://" + deviceHostname + ".local");
+  } else {
+    Serial.println("Error setting up mDNS responder!");
+  }
+  return mdnsOk;
+}
+
+// Post-join side effects shared by the boot path and the web provisioning
+// path: re-announce mDNS on the new station interface and rebuild the OLED
+// scroll text for the joined network.
+void announceNetwork(const String& ssid) {
+  MDNS.end();
+  startMdns();
+  wifiInfoText = "AP: " + String(AP_SSID) + " (" + WiFi.softAPIP().toString() +
+                 ")  |  Network: " + ssid + " (" + networkIP.toString() + ") or " +
+                 deviceHostname + ".local  |  ";
+}
+
+// OLED scroll text for AP-only operation (no station connection).
+void setApOnlyInfoText() {
+  wifiInfoText = "Connect to WiFi: " + String(AP_SSID) + "  |  Pass: " + String(AP_PASS) +
+                 "  |  IP: " + WiFi.softAPIP().toString() + "  |  Captive Portal will auto-open!  |  ";
+}
+
+// Force the WiFi info scroll back on, even if the user has already driven the
+// robot (recordInput() normally suppresses it permanently). Used after web
+// provisioning so the new address is actually visible on the OLED.
+void showWifiInfoNow() {
+  firstInputReceived = false;
+  lastInputTime = millis() - 30000;  // make the idle check pass immediately
+  showingWifiInfo = false;           // let updateWifiInfoScroll re-init scroll state
+}
+
+// Blocking connect for the BOOT path only (the web server isn't running yet,
+// so waiting here is harmless). Keeps the SoftAP alive via WIFI_AP_STA.
+// Fast-fails on terminal states (wrong password / SSID not found) and stops
+// background retries on failure. The web path uses updateWifiSetup() instead.
 bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
   if (ssid.length() == 0) return false;
 
@@ -378,7 +457,11 @@ bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+  while ((millis() - start) < timeoutMs) {
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) break;
+    // Terminal states — waiting longer won't help.
+    if ((millis() - start) > 1000 && (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL)) break;
     delay(250);
     Serial.print(".");
   }
@@ -386,6 +469,7 @@ bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi connect failed.");
+    WiFi.disconnect();  // stop the driver retrying bad credentials in the background
     return false;
   }
 
@@ -396,77 +480,172 @@ bool connectToWifi(const String& ssid, const String& pass, uint32_t timeoutMs) {
   return true;
 }
 
-// GET /api/wifi/scan -> JSON array of nearby networks (raw; the UI dedups/sorts).
-void handleWifiScan() {
-  if (WiFi.getMode() == WIFI_AP) {
-    WiFi.mode(WIFI_AP_STA);   // station iface must be up to scan
+// Finish a web-initiated connect attempt (success or failure).
+void finishWifiSetup(const String& err) {
+  wifiSetupError = err;
+  wifiSetupPass = "";  // don't keep the password in RAM longer than needed
+  wifiSetupState = WIFI_SETUP_IDLE;
+}
+
+// Drives the non-blocking web connect from loop(). Also acts as a watchdog
+// that keeps the cached networkConnected/networkIP honest if the router
+// drops (or restores) the station link later.
+void updateWifiSetup() {
+  if (wifiSetupState == WIFI_SETUP_IDLE) {
+    static unsigned long lastCheckMs = 0;
+    if (millis() - lastCheckMs >= 5000) {
+      lastCheckMs = millis();
+      bool live = (WiFi.status() == WL_CONNECTED);
+      if (live != networkConnected) {
+        networkConnected = live;
+        if (live) {
+          networkIP = WiFi.localIP();
+          announceNetwork(WiFi.SSID());
+        } else {
+          Serial.println("Station link lost.");
+        }
+      }
+    }
+    return;
   }
-  int n = WiFi.scanNetworks();
+
+  if (wifiSetupState == WIFI_SETUP_QUEUED) {
+    // Wait for the HTTP response to reach the client: joining a router on
+    // another channel drags the SoftAP with it and deauths AP clients.
+    if (millis() - wifiSetupQueuedMs < WIFI_SETUP_START_DELAY_MS) return;
+    Serial.println("Connecting to WiFi network: " + wifiSetupSsid);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setHostname(deviceHostname.c_str());
+    WiFi.begin(wifiSetupSsid.c_str(), wifiSetupPass.c_str());
+    wifiSetupStartMs = millis();
+    wifiSetupState = WIFI_SETUP_CONNECTING;
+    return;
+  }
+
+  // WIFI_SETUP_CONNECTING
+  wl_status_t st = WiFi.status();
+  if (st == WL_CONNECTED) {
+    networkConnected = true;
+    networkIP = WiFi.localIP();
+    Serial.println("Connected! IP: " + networkIP.toString());
+    announceNetwork(wifiSetupSsid);
+    showWifiInfoNow();
+    finishWifiSetup("");
+    return;
+  }
+  // Grace period before trusting terminal states: right after WiFi.begin()
+  // the status can still reflect the previous attempt.
+  bool terminal = (millis() - wifiSetupStartMs > 1000) &&
+                  (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL);
+  if (terminal || (millis() - wifiSetupStartMs) >= WIFI_CONNECT_TIMEOUT_MS) {
+    String err = (st == WL_NO_SSID_AVAIL)  ? "Network not found"
+               : (st == WL_CONNECT_FAILED) ? "Wrong password or connection rejected"
+                                           : "Connection timed out";
+    Serial.println("WiFi connect failed: " + err);
+    WiFi.disconnect();        // cancel the attempt; stop background retries
+    networkConnected = false; // WiFi.begin() already tore down any previous link
+    setApOnlyInfoText();      // OLED must not keep advertising a dead network IP
+    finishWifiSetup(err);
+  }
+}
+
+// GET /api/wifi/scan -> {"scanning":true} while the async scan runs, then a
+// JSON array of nearby networks (raw; the UI dedups/sorts). Async keeps the
+// captive portal responsive — the blocking scan stalls loop() for 2-4s.
+void handleWifiScan() {
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) {
+    server.send(200, "application/json", "{\"scanning\":true}");
+    return;
+  }
+  if (n < 0) {  // no scan results yet -> start one (unless a connect is mid-flight)
+    if (wifiSetupState != WIFI_SETUP_IDLE) {
+      server.send(200, "application/json", "{\"scanning\":true}");
+      return;
+    }
+    if (WiFi.getMode() == WIFI_AP) {
+      WiFi.mode(WIFI_AP_STA);   // station iface must be up to scan
+      wifiRestoreApOnly = true; // drop it again once the scan is done
+    }
+    WiFi.scanNetworks(true /*async*/);
+    server.send(200, "application/json", "{\"scanning\":true}");
+    return;
+  }
+
   String json = "[";
+  json.reserve(n * 64 + 2);
   for (int i = 0; i < n; i++) {
     if (i > 0) json += ",";
-    String ssid = WiFi.SSID(i);
-    ssid.replace("\\", "\\\\");
-    ssid.replace("\"", "\\\"");
-    json += "{\"ssid\":\"" + ssid + "\",";
+    json += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
     json += "\"secure\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true") + "}";
   }
   json += "]";
   WiFi.scanDelete();
+  // Restore the deliberate AP-only fallback if the scan was the only reason
+  // the station interface came up.
+  if (wifiRestoreApOnly && wifiSetupState == WIFI_SETUP_IDLE && WiFi.status() != WL_CONNECTED) {
+    WiFi.mode(WIFI_AP);
+  }
+  wifiRestoreApOnly = false;
   server.send(200, "application/json", json);
 }
 
-// POST /api/wifi/connect (form: ssid, password) -> {success, ip, host} | {success:false, error}
+// POST /api/wifi/connect (form: ssid, password) -> {"success":true,"pending":true}.
+// The attempt itself runs from loop() (updateWifiSetup) so this handler never
+// blocks; the UI polls /api/wifi/status for the outcome.
 void handleWifiConnect() {
   if (server.method() != HTTP_POST) {
     server.send(405, "application/json", "{\"success\":false,\"error\":\"Method not allowed\"}");
     return;
   }
   String ssid = server.arg("ssid");
-  String pass = server.arg("password");
   if (ssid.length() == 0) {
     server.send(400, "application/json", "{\"success\":false,\"error\":\"SSID required\"}");
     return;
   }
-
-  if (!connectToWifi(ssid, pass)) {
-    server.send(200, "application/json", "{\"success\":false,\"error\":\"Could not connect\"}");
+  if (wifiSetupState != WIFI_SETUP_IDLE) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"Connection attempt already in progress\"}");
     return;
   }
 
-  // Re-announce mDNS on the freshly-joined station interface so
-  // sesame-robot.local resolves on the LAN.
-  MDNS.end();
-  if (MDNS.begin(deviceHostname.c_str())) {
-    MDNS.addService("http", "tcp", 80);
-  }
-
-  // Refresh the OLED scroll text to show the new network.
-  wifiInfoText = "AP: " + String(AP_SSID) + " (" + WiFi.softAPIP().toString() +
-                 ")  |  Network: " + ssid + " (" + networkIP.toString() + ") or " +
-                 deviceHostname + ".local  |  ";
-
-  String json = "{\"success\":true,\"ip\":\"" + networkIP.toString() +
-                "\",\"host\":\"" + deviceHostname + ".local\"}";
-  server.send(200, "application/json", json);
+  wifiSetupSsid = ssid;
+  wifiSetupPass = server.arg("password");
+  wifiSetupError = "";
+  wifiSetupQueuedMs = millis();
+  wifiSetupState = WIFI_SETUP_QUEUED;
+  wifiRestoreApOnly = false;  // an explicit connect supersedes scan cleanup
+  server.send(200, "application/json", "{\"success\":true,\"pending\":true}");
 }
 
-// GET /api/wifi/status -> current station connection state for the Settings panel.
+// GET /api/wifi/status -> station state for the Settings panel, including
+// in-progress attempts and the last error so the UI can poll for the result.
 void handleWifiStatus() {
   bool connected = (WiFi.status() == WL_CONNECTED);
   String json = "{\"connected\":" + String(connected ? "true" : "false");
+  json += ",\"connecting\":" + String(wifiSetupState != WIFI_SETUP_IDLE ? "true" : "false");
+  if (wifiSetupError.length() > 0) {
+    json += ",\"lastError\":\"" + jsonEscape(wifiSetupError) + "\"";
+  }
   if (connected) {
-    String ssid = WiFi.SSID();
-    ssid.replace("\\", "\\\\");
-    ssid.replace("\"", "\\\"");
-    json += ",\"ssid\":\"" + ssid + "\"";
+    json += ",\"ssid\":\"" + jsonEscape(WiFi.SSID()) + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += ",\"host\":\"" + deviceHostname + ".local\"";
+    json += ",\"mdns\":" + String(mdnsOk ? "true" : "false");
     json += ",\"rssi\":" + String(WiFi.RSSI());
   }
   json += "}";
   server.send(200, "application/json", json);
+}
+
+// Unmatched routes: JSON 404 for API paths (a typo'd /api/* URL must not get
+// 200 + portal HTML), captive-portal redirect for everything else.
+void handleNotFound() {
+  if (server.uri().startsWith("/api/")) {
+    server.send(404, "application/json", "{\"error\":\"Not found\"}");
+    return;
+  }
+  handleRoot();
 }
 
 void setup() {
@@ -490,6 +669,10 @@ void setup() {
   display.display();
 
   // --- WIFI CONFIGURATION ---
+  // Don't write credentials to NVS flash: runtime WiFi setup is session-only
+  // (see firmware/README.md), and passwords shouldn't persist silently.
+  WiFi.persistent(false);
+
   // Try to connect to network first if configured
   if (ENABLE_NETWORK_MODE && String(NETWORK_SSID).length() > 0) {
     if (!connectToWifi(NETWORK_SSID, NETWORK_PASS)) {
@@ -508,28 +691,18 @@ void setup() {
   Serial.print("AP Created. IP: ");
   Serial.println(myIP);
 
-  // Build WiFi info text for scrolling
+  // Build WiFi info text for scrolling + start mDNS responder
   if (networkConnected) {
-    wifiInfoText = "AP: " + String(AP_SSID) + " (" + myIP.toString() + ")  |  Network: " + String(NETWORK_SSID) + " (" + networkIP.toString() + ") or " + deviceHostname + ".local  |  ";
+    announceNetwork(NETWORK_SSID);
   } else {
-    wifiInfoText = "Connect to WiFi: " + String(AP_SSID) + "  |  Pass: " + String(AP_PASS) + "  |  IP: " + myIP.toString() + "  |  Captive Portal will auto-open!  |  ";
+    setApOnlyInfoText();
+    startMdns();
   }
-  
+
   // Initialize input tracking
   lastInputTime = millis();
   firstInputReceived = false;
   showingWifiInfo = false;
-
-  // Start mDNS responder for local network discovery
-  if (MDNS.begin(deviceHostname.c_str())) {
-    Serial.println("mDNS responder started");
-    Serial.print("Access controller at: http://");
-    Serial.print(deviceHostname);
-    Serial.println(".local");
-    MDNS.addService("http", "tcp", 80);
-  } else {
-    Serial.println("Error setting up mDNS responder!");
-  }
 
   // Start DNS Server for Captive Portal
   // This redirects ALL domain requests to the ESP32's IP
@@ -552,7 +725,8 @@ void setup() {
   
   // Catch-all route for captive portal
   // This ensures any URL redirects to the controller page
-  server.onNotFound(handleRoot);
+  // (except /api/* paths, which get a JSON 404 — see handleNotFound)
+  server.onNotFound(handleNotFound);
   
   server.begin();
 
@@ -580,6 +754,7 @@ void loop() {
   dnsServer.processNextRequest();
   
   server.handleClient();
+  updateWifiSetup();
   updateAnimatedFace();
   updateIdleBlink();
   updateWifiInfoScroll();

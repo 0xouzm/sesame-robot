@@ -199,10 +199,10 @@ You can join the robot to your network at runtime, without editing the code:
 
 1. Connect to the `Sesame-Controller-BETA` access point and open the captive portal.
 2. Go to **Settings → WiFi / Network**, tap **Scan for Networks**, and pick your **2.4GHz** network (or tick *Enter name manually* for a hidden SSID).
-3. Enter the password and tap **Connect**. The robot keeps its access point up while it joins, so you won't lose the page.
+3. Enter the password and tap **Connect**. The connection runs in the background and the page polls for the result (takes ~15s). Your phone may briefly drop off the robot's network while the robot switches WiFi channel — it reconnects automatically and the page recovers.
 4. On success the panel shows the link to `http://sesame-robot.local` and the assigned IP.
 
-> Credentials set this way are **not persisted yet** — after a reboot the robot returns to access-point mode and you re-enter them. (The compile-time method below survives reboots.)
+> Credentials set this way are **not persisted** (the firmware sets `WiFi.persistent(false)`, so they are not written to flash) — after a reboot the robot returns to access-point mode and you re-enter them. (The compile-time method below survives reboots.)
 
 ### Network Mode (Optional)
 
