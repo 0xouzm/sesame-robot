@@ -47,11 +47,11 @@ If you have an original V3 board, you can manually fix it by following these ste
 
 ### V3.1 Board Details and Schematics:
 
-<img src="distro-v3.1/assets/close-v3.png" alt="Sesame Distro Board V3.1 Close-up" width="70%">
+<img src="distro-v3.1/assets/pcb-v3.1-close.png" alt="Sesame Distro Board V3.1 Close-up" width="70%">
 
-<img src="distro-v3.1/assets/Schematic_Sesame-Distro-Board-V3_2026-05-30.png" alt="Schematic_Sesame-Distro-Board-V3.1" width="70%">
+<img src="distro-v3.1/assets/Schematic_Sesame-Distro-Board-V3.1.png" alt="Schematic_Sesame-Distro-Board-V3.1" width="70%">
 
-<img src="distro-v3.1/assets/layout-v3.png" alt="Sesame Distro Board V3.1 Layout" width="70%">
+<img src="distro-v3.1/assets/pcb-v3.1.png" alt="Sesame Distro Board V3.1 Layout" width="70%">
 
 ### V3 Files Available
 
