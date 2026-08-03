@@ -37,21 +37,24 @@ For users with the original V3 board, a temporary fix involved manually cutting 
 
 If you have an original V3 board, you can manually fix it by following these steps:
 
-1.  **Cut the USB Data Line Traces:** Using a sharp hobby knife, carefully cut the two traces connecting the PD chip to the USB data lines. The location of these traces is highlighted in the image below.
+1.  **Cut the USB Data Line Traces:** Using a sharp hobby knife or snips, carefully cut the two traces or pins connecting the PD chip to the USB data lines. The location of these traces is highlighted in the image below.
 
 2.  **Flip the Battery Connector:** Desolder the battery connector, rotate it 180 degrees, and solder it back onto the board. This will correct the polarity.
 
-<img src="distro-v3.1/assets/pcbv3-fix.png" alt="V3 PCB Fix Guide" width="70%">
+**After you cut the traces, you must put the board in download mode!** Enable download mode by holding down the BOOT button, keeping it held, then plugging the board into your computer. Keep holding the boot button for two seconds, then release the boot button. This will place the board in download mode.
 
+It will continue to boot loop if you do not put it into download mode!
 
+<img src="distro-v3.1/assets/pcbv3-fix.png" alt="V3 PCB Fix Guide" width="30%">
+(click the image to enlarge)
 
 ### V3.1 Board Details and Schematics:
 
-<img src="distro-v3.1/assets/pcb-v3.1-close.png" alt="Sesame Distro Board V3.1 Close-up" width="70%">
+<img src="distro-v3.1/assets/pcb-v3.1-close.png" alt="Sesame Distro Board V3.1 Close-up" width="50%">
 
-<img src="distro-v3.1/assets/Schematic_Sesame-Distro-Board-V3.1.png" alt="Schematic_Sesame-Distro-Board-V3.1" width="70%">
+<img src="distro-v3.1/assets/Schematic_Sesame-Distro-Board-V3.1.png" alt="Schematic_Sesame-Distro-Board-V3.1" width="50%">
 
-<img src="distro-v3.1/assets/pcb-v3.1.png" alt="Sesame Distro Board V3.1 Layout" width="70%">
+<img src="distro-v3.1/assets/pcb-v3.1.png" alt="Sesame Distro Board V3.1 Layout" width="50%">
 
 ### V3 Files Available
 
