@@ -542,6 +542,17 @@ void loop() {
         else if(strcmp(command_buffer, "rn sg") == 0) { currentCommand = "shrug"; runShrugPose(); }
         else if(strcmp(command_buffer, "rn dd") == 0) { currentCommand = "dead"; runDeadPose(); }
         else if(strcmp(command_buffer, "rn cb") == 0) { currentCommand = "crab"; runCrabPose(); }
+        else if (strncmp(command_buffer, "face ", 5) == 0 || strncmp(command_buffer, "fc ", 3) == 0) {
+          const char* faceName = (command_buffer[1] == 'c') ? command_buffer + 3 : command_buffer + 5;
+          if (strlen(faceName) > 0) {
+            currentCommand = "";
+            setFace(String(faceName));
+            Serial.print("Face set to ");
+            Serial.println(faceName);
+          } else {
+            Serial.println("Usage: face <name>");
+          }
+        }
         else if (strcmp(command_buffer, "subtrim") == 0 || strcmp(command_buffer, "st") == 0) {
           Serial.println("Subtrim values:");
           for (int i = 0; i < 8; i++) {
